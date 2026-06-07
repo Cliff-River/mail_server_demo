@@ -4,6 +4,8 @@ from email import message_from_bytes
 
 class CustomMailHandler:
     async def handle_DATA(self, server, session, envelope):
+        print(dir(envelope))  # 打印原始邮件内容（字节流）
+
         # envelope 包含了发件人、收件人和邮件原始数据
         print("== 收到新邮件 ==")
         print(f"发件人: {envelope.mail_from}")
