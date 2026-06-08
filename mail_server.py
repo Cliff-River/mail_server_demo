@@ -4,6 +4,27 @@ from email import message_from_bytes
 from typing import Any
 from aiosmtpd.smtp import SMTP, Session, Envelope, AuthResult, LoginPassword
 
+
+class ModernSession(Session):
+    @property
+    def login_data(self):
+        return self._login_data
+
+
+    @login_data.setter
+    def login_data(self, value):
+        self._login_data = value
+
+
+class ModernSMTP(SMTP):
+    def _create_session(self) -> Session:
+        return ModernSession(self.loop)
+
+
+class ModernController(Controller):
+    def factory(self):
+        return ModernSMTP(self.handler, **self.SMTP_kwargs)
+
 # 定义一个身份验证器函数
 def my_authenticator(
     server: SMTP, 
@@ -67,7 +88,7 @@ if __name__ == '__main__':
     # 设置控制器监听本地的 1025 端口
     # 注意：标准 SMTP 端口是 25，但在 Linux/Mac 上绑定 25 端口需要 root 权限，
     # 所以测试时通常使用 1025 或 8025。
-    controller = Controller(
+    controller = ModernController(
         handler, 
         hostname='127.0.0.1', 
         port=1025,
