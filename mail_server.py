@@ -23,7 +23,6 @@ def my_authenticator(
     # 提取用户名和密码（注意这里是 bytes 类型，需要解码或者直接对比字节）
     username = auth_data.login
     password = auth_data.password
-    print(username, password)  # 调试输出，实际中请勿打印敏感信息！
 
     # 2. 核心校验逻辑（这里写死账密用于演示，实际中应查询数据库）
     if username == b'admin@example.com' and password == b'secret123':
@@ -34,7 +33,7 @@ def my_authenticator(
     return AuthResult(success=False, handled=False)
 
 class CustomMailHandler:
-    async def handle_DATA(self, server, session, envelope):
+    async def handle_DATA(self, server : SMTP, session : Session, envelope : Envelope):
         # envelope 包含了发件人、收件人和邮件原始数据
         print("== 收到新邮件 ==")
         print(f"发件人: {envelope.mail_from}")
