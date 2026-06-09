@@ -30,7 +30,7 @@ def my_authenticator(
     server: SMTP, 
     session: Session, 
     envelope: Envelope, 
-    mechanism: bytes, 
+    mechanism: str, 
     auth_data: Any
 ) -> AuthResult:
     # 确保使用的是常见的 LOGIN 或 PLAIN 机制
