@@ -53,6 +53,8 @@ def my_authenticator(
     print(f"[!] 身份验证被拒绝: 用户 {username.decode('utf-8')} 密码错误。")
     return AuthResult(success=False, handled=False)
 
+import os
+
 class CustomMailHandler:
     async def handle_DATA(self, server : SMTP, session : Session, envelope : Envelope):
         # envelope 包含了发件人、收件人和邮件原始数据
@@ -66,6 +68,12 @@ class CustomMailHandler:
         # 打印邮件主题
         print(f"主题: {msg.get('Subject', '无主题')}")
         
+        # 打印抄送地址
+        cc_list = msg.get('Cc', '')
+        if cc_list:
+            cc_addrs = [addr.strip() for addr in cc_list.split(',')]
+            print(f"抄送人: {', '.join(cc_addrs)}")
+        
         # 提取并打印邮件正文
         print("正文内容:")
         if msg.is_multipart():
@@ -75,11 +83,43 @@ class CustomMailHandler:
                     print(part.get_payload(decode=True).decode(part.get_content_charset() or 'utf-8'))
         else:
             print(msg.get_payload(decode=True).decode(msg.get_content_charset() or 'utf-8'))
+        
+        # 处理附件
+        await self._handle_attachments(msg)
             
         print("================\n")
         
         # 返回 250 状态码，告诉发送方邮件已成功接收
         return '250 Message accepted for delivery'
+    
+    async def _handle_attachments(self, msg):
+        """处理邮件附件"""
+        attachments_dir = 'attachments'
+        # 确保附件目录存在
+        os.makedirs(attachments_dir, exist_ok=True)
+        
+        if msg.is_multipart():
+            for part in msg.walk():
+                # 检查是否是附件
+                content_disposition = part.get('Content-Disposition', None)
+                if content_disposition and 'attachment' in content_disposition.lower():
+                    # 获取附件文件名
+                    filename = part.get_filename()
+                    if filename:
+                        # 解码文件名（处理中文文件名）
+                        if isinstance(filename, bytes):
+                            filename = filename.decode('utf-8')
+                        else:
+                            filename = str(filename)
+                        
+                        # 保存附件
+                        try:
+                            filepath = os.path.join(attachments_dir, filename)
+                            with open(filepath, 'wb') as f:
+                                f.write(part.get_payload(decode=True))
+                            print(f"附件已保存: {filepath}")
+                        except Exception as e:
+                            print(f"保存附件失败 {filename}: {e}")
 
 if __name__ == '__main__':
     # 初始化处理器
@@ -105,7 +145,7 @@ if __name__ == '__main__':
     # 保持主线程运行
     try:
         while True:
-            time.sleep(1)
+            time.sleep(0.02)
     except KeyboardInterrupt:
         print("\n检测到 Ctrl+C，服务器正在关闭...")
     finally:
