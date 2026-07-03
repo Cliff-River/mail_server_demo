@@ -23,7 +23,7 @@ def main():
 
     try:
         while True:
-            time.sleep(0.02)
+            time.sleep(0.1)
     except KeyboardInterrupt:
         print("\n检测到 Ctrl+C，服务器正在关闭...")
     finally:
