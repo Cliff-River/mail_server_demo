@@ -1,8 +1,9 @@
 import yagmail
 import smtplib
 import os
+import io
 import logging
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 from config import HOSTNAME, PORT, VALID_CREDENTIALS
 
 logger = logging.getLogger(__name__)
@@ -28,6 +29,7 @@ class MailClient:
     邮件客户端类，使用 yagmail 库实现邮件发送功能
 
     支持邮件主题、正文、抄送、密送和附件等功能，提供上下文管理器支持。
+    支持通过文件路径或字节流发送附件，无需解析文件内容。
     """
 
     def __init__(
@@ -87,6 +89,58 @@ class MailClient:
             finally:
                 self._client = None
 
+    def _file_to_stream(self, file_path: str) -> io.BytesIO:
+        """
+        将文件转换为字节流，不解析文件内容
+
+        Args:
+            file_path: 文件路径
+
+        Returns:
+            BytesIO 对象，包含文件名属性
+
+        Raises:
+            FileNotFoundError: 文件不存在
+            IOError: 文件读取失败
+        """
+        if not os.path.exists(file_path):
+            raise FileNotFoundError(f"附件文件不存在: {file_path}")
+
+        with open(file_path, 'rb') as f:
+            stream = io.BytesIO(f.read())
+
+        stream.name = os.path.basename(file_path)
+        return stream
+
+    def _prepare_attachments(
+        self,
+        attachments: Optional[List[str]] = None,
+        byte_attachments: Optional[List[Tuple[str, bytes]]] = None,
+    ) -> List[io.IOBase]:
+        """
+        准备附件数据，将文件路径和字节数据转换为字节流
+
+        Args:
+            attachments: 文件路径列表
+            byte_attachments: 字节数据附件列表，格式为 [(filename, bytes), ...]
+
+        Returns:
+            统一格式的附件列表，每个元素为 io.BytesIO 对象
+        """
+        prepared = []
+
+        if attachments:
+            for file_path in attachments:
+                prepared.append(self._file_to_stream(file_path))
+
+        if byte_attachments:
+            for filename, file_bytes in byte_attachments:
+                stream = io.BytesIO(file_bytes)
+                stream.name = filename
+                prepared.append(stream)
+
+        return prepared
+
     def send_email(
         self,
         to: List[str],
@@ -95,6 +149,7 @@ class MailClient:
         cc: Optional[List[str]] = None,
         bcc: Optional[List[str]] = None,
         attachments: Optional[List[str]] = None,
+        byte_attachments: Optional[List[Tuple[str, bytes]]] = None,
     ) -> Dict[str, Any]:
         """
         发送邮件
@@ -106,6 +161,7 @@ class MailClient:
             cc: 抄送邮箱地址列表
             bcc: 密送邮箱地址列表
             attachments: 附件文件路径列表
+            byte_attachments: 字节数据附件列表，格式为 [(filename, bytes), ...]
 
         Returns:
             包含发送结果的字典，格式为 {"success": bool, "result": Any, "message": str}
@@ -127,10 +183,7 @@ class MailClient:
         if not subject:
             raise ValueError("邮件主题不能为空")
 
-        if attachments:
-            for file_path in attachments:
-                if not os.path.exists(file_path):
-                    raise FileNotFoundError(f"附件文件不存在: {file_path}")
+        prepared_attachments = self._prepare_attachments(attachments, byte_attachments)
 
         try:
             result = self._client.send(
@@ -139,7 +192,7 @@ class MailClient:
                 contents=contents,
                 cc=cc,
                 bcc=bcc,
-                attachments=attachments,
+                attachments=prepared_attachments,
             )
             return {"success": True, "result": result, "message": "邮件发送成功"}
         except smtplib.SMTPAuthenticationError as e:
@@ -177,6 +230,7 @@ def send_email_simple(
     cc: Optional[List[str]] = None,
     bcc: Optional[List[str]] = None,
     attachments: Optional[List[str]] = None,
+    byte_attachments: Optional[List[Tuple[str, bytes]]] = None,
     username: Optional[str] = None,
     password: Optional[str] = None,
     smtp_host: Optional[str] = None,
@@ -194,6 +248,7 @@ def send_email_simple(
         cc: 抄送邮箱地址列表
         bcc: 密送邮箱地址列表
         attachments: 附件文件路径列表
+        byte_attachments: 字节数据附件列表，格式为 [(filename, bytes), ...]
         username: SMTP用户名，默认为配置文件中的默认凭据
         password: SMTP密码，默认为配置文件中的默认凭据
         smtp_host: SMTP服务器地址，默认为配置文件中的HOSTNAME
@@ -225,19 +280,54 @@ def send_email_simple(
             cc=cc,
             bcc=bcc,
             attachments=attachments,
+            byte_attachments=byte_attachments,
         )
 
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
 
+    report_content = """========================================
+              系统状态报告
+========================================
+生成时间: 2026-07-26
+报告类型: 自动生成
+
+[服务器状态]
+CPU 使用率: 23.5%
+内存使用率: 67.2%
+磁盘空间: 45.8 GB / 100 GB
+
+[服务状态]
+SMTP 服务: 运行中
+HTTP 服务: 运行中
+数据库连接: 正常
+
+[告警信息]
+无异常告警
+
+========================================
+报告结束
+========================================
+""".encode('utf-8')
+
+    csv_content = """日期,用户数,邮件发送量,成功率
+2026-07-20,1250,3500,98.5%
+2026-07-21,1320,3800,99.1%
+2026-07-22,1280,3600,98.8%
+2026-07-23,1400,4100,99.2%
+2026-07-24,1350,3900,98.9%
+2026-07-25,1420,4200,99.3%
+2026-07-26,1380,4000,99.0%
+""".encode('utf-8')
+
     try:
         result = send_email_simple(
             to=["receiver@example.com"],
-            subject="Python SMTP 身份验证测试 - 带附件",
-            contents="这是一封经过密码验证才发送成功的邮件！\n\n附件已包含在内。",
+            subject="Python SMTP 身份验证测试 - 字节流附件",
+            contents="这是一封使用字节流发送附件的邮件！\n\n附件内容为系统状态报告，由程序自动生成，未读取任何文件。",
             cc=["cc1@example.com", "cc2@example.com", "cc3@example.com"],
-            attachments=["example.txt"],
+            byte_attachments=[("system_report.txt", report_content)],
         )
         print(result["message"])
     except AuthenticationError as e:
@@ -246,7 +336,26 @@ if __name__ == "__main__":
         print(f"SMTP 协议错误：{e}")
     except ConnectionError as e:
         print(f"连接失败：{e}")
-    except FileNotFoundError as e:
-        print(f"附件错误：{e}")
+    except MailError as e:
+        print(f"邮件发送失败：{e}")
+
+    try:
+        byte_result = send_email_simple(
+            to=["receiver@example.com"],
+            subject="Python SMTP 身份验证测试 - 多附件发送",
+            contents="这是一封包含多个字节流附件的邮件！\n\n附件内容均由程序自动生成，未访问文件系统。",
+            cc=["cc1@example.com"],
+            byte_attachments=[
+                ("system_report.txt", report_content),
+                ("daily_stats.csv", csv_content),
+            ],
+        )
+        print(byte_result["message"])
+    except AuthenticationError as e:
+        print(f"发送失败：{e}")
+    except SMTPError as e:
+        print(f"SMTP 协议错误：{e}")
+    except ConnectionError as e:
+        print(f"连接失败：{e}")
     except MailError as e:
         print(f"邮件发送失败：{e}")
