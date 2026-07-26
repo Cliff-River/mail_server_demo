@@ -6,5 +6,6 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "aiosmtpd>=1.4.6",
+    "mail-parser>=4.4.0",
     "yagmail>=0.16.0",
 ]

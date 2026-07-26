@@ -1,94 +1,149 @@
-from email import message_from_bytes
-from email.header import decode_header
-from email.message import Message
+import logging
+import base64
+from typing import Dict, List, Any
+from mailparser import MailParser
 from aiosmtpd.smtp import SMTP, Session, Envelope
 from utils.attachment import save_attachments
 
-
-def decode_email_header(header_value):
-    if not header_value:
-        return ''
-    decoded_parts = decode_header(header_value)
-    result = []
-    for part, charset in decoded_parts:
-        if isinstance(part, bytes):
-            if charset:
-                try:
-                    result.append(part.decode(charset))
-                except (UnicodeDecodeError, LookupError):
-                    result.append(part.decode('utf-8', errors='replace'))
-            else:
-                result.append(part.decode('utf-8', errors='replace'))
-        else:
-            result.append(str(part))
-    return ''.join(result)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
 
 
-def is_attachment(part):
-    content_disposition = part.get('Content-Disposition', '')
-    if 'attachment' in content_disposition.lower():
-        return True
-    if part.get_filename():
-        return True
-    return False
-
-
-def extract_email_body(msg: Message):
-    body = []
-    if msg.is_multipart():
-        for part in msg.walk():
-            if is_attachment(part):
-                continue
-            if part.get_content_type() == 'text/plain':
-                charset = part.get_content_charset() or 'utf-8'
-                try:
-                    payload = part.get_payload(decode=True)
-                    if payload:
-                        body.append(payload.decode(charset, errors='replace'))
-                except Exception as e:
-                    print(f"解析正文失败: {e}")
-            elif part.get_content_type() == 'text/html':
-                charset = part.get_content_charset() or 'utf-8'
-                try:
-                    payload = part.get_payload(decode=True)
-                    if payload:
-                        body.append(payload.decode(charset, errors='replace'))
-                except Exception as e:
-                    print(f"解析HTML正文失败: {e}")
-    else:
-        charset = msg.get_content_charset() or 'utf-8'
+class EmailParser:
+    def parse_from_bytes(self, content: bytes) -> Dict[str, Any]:
         try:
-            payload = msg.get_payload(decode=True)
-            if payload:
-                body.append(payload.decode(charset, errors='replace'))
+            parser = MailParser.from_bytes(content)
+            return self._extract_email_data(parser)
         except Exception as e:
-            print(f"解析正文失败: {e}")
-    return '\n'.join(body)
+            raise EmailParseError(f"邮件解析失败: {str(e)}")
+
+    def parse_from_string(self, content: str) -> Dict[str, Any]:
+        try:
+            parser = MailParser.from_string(content)
+            return self._extract_email_data(parser)
+        except Exception as e:
+            raise EmailParseError(f"邮件解析失败: {str(e)}")
+
+    def _extract_email_data(self, parser: MailParser) -> Dict[str, Any]:
+        return {
+            'from': self._extract_address_list(parser.from_),
+            'to': self._extract_address_list(parser.to),
+            'cc': self._extract_address_list(parser.cc),
+            'bcc': self._extract_address_list(parser.bcc),
+            'subject': parser.subject or '',
+            'date': parser.date.isoformat() if parser.date else '',
+            'timezone': str(parser.timezone) if parser.timezone else '',
+            'message_id': parser.message_id or '',
+            'reply_to': self._extract_address_list(parser.reply_to),
+            'body': self._extract_body(parser),
+            'attachments': self._extract_attachments_info(parser),
+            'headers': dict(parser.headers) if parser.headers else {},
+            'received': parser.received or [],
+            'has_defects': parser.has_defects,
+            'defects': parser.defects_categories if parser.defects else [],
+        }
+
+    def _extract_address_list(self, addresses) -> List[Dict[str, str]]:
+        result = []
+        if addresses:
+            for item in addresses:
+                name, address = item
+                result.append({
+                    'name': name or '',
+                    'address': address or ''
+                })
+        return result
+
+    def _extract_body(self, parser: MailParser) -> Dict[str, Any]:
+        return {
+            'plain': parser.text_plain or [],
+            'html': parser.text_html or [],
+            'full': parser.body or ''
+        }
+
+    def _extract_attachments_info(self, parser: MailParser) -> List[Dict[str, Any]]:
+        result = []
+        if parser.attachments:
+            for attachment in parser.attachments:
+                payload = attachment.get('payload', '')
+                binary_data = b''
+                if payload:
+                    try:
+                        binary_data = base64.b64decode(payload)
+                    except Exception:
+                        binary_data = payload.encode('utf-8', errors='replace')
+                
+                result.append({
+                    'filename': attachment.get('filename', ''),
+                    'size': len(binary_data),
+                    'content_type': attachment.get('mail_content_type', ''),
+                    'content_id': attachment.get('content-id', ''),
+                    'encoding': attachment.get('content_transfer_encoding', ''),
+                    'binary': binary_data
+                })
+        return result
+
+
+class EmailParseError(Exception):
+    pass
 
 
 class CustomMailHandler:
+    def __init__(self):
+        self.email_parser = EmailParser()
+
     async def handle_DATA(self, server: SMTP, session: Session, envelope: Envelope):
-        print("== 收到新邮件 ==")
-        print(f"发件人: {envelope.mail_from}")
-        print(f"收件人: {envelope.rcpt_tos}")
+        try:
+            email_data = self.email_parser.parse_from_bytes(envelope.content)
+            self._log_email_info(email_data)
+            await save_attachments(email_data)
+            return '250 Message accepted for delivery'
+        except EmailParseError as e:
+            logger.error(f"邮件解析错误: {e}")
+            return '500 Internal server error'
+        except Exception as e:
+            logger.error(f"邮件处理异常: {e}")
+            return '500 Internal server error'
 
-        msg = message_from_bytes(envelope.content)
+    def _log_email_info(self, email_data: Dict[str, Any]):
+        logger.info("== 收到新邮件 ==")
+        logger.info(f"发件人: {self._format_address_list(email_data['from'])}")
+        logger.info(f"收件人: {self._format_address_list(email_data['to'])}")
+        
+        if email_data['cc']:
+            logger.info(f"抄送人: {self._format_address_list(email_data['cc'])}")
+        
+        if email_data['bcc']:
+            logger.info(f"密送人: {self._format_address_list(email_data['bcc'])}")
+        
+        logger.info(f"主题: {email_data['subject'] or '无主题'}")
+        logger.info(f"发送时间: {email_data['date']}")
+        logger.info(f"Message-ID: {email_data['message_id']}")
+        
+        if email_data['body']['full']:
+            body_preview = email_data['body']['full'][:500] + '...' if len(email_data['body']['full']) > 500 else email_data['body']['full']
+            logger.info(f"正文内容: {body_preview}")
+        
+        if email_data['attachments']:
+            logger.info(f"附件数量: {len(email_data['attachments'])}")
+            for idx, attachment in enumerate(email_data['attachments'], 1):
+                logger.info(f"  {idx}. {attachment['filename']} ({attachment['size']} bytes, {attachment['content_type']})")
+        
+        logger.info("================")
 
-        subject = decode_email_header(msg.get('Subject'))
-        print(f"主题: {subject if subject else '无主题'}")
-
-        cc_list = msg.get('Cc', '')
-        if cc_list:
-            cc_addrs = [addr.strip() for addr in cc_list.split(',')]
-            cc_addrs_decoded = [decode_email_header(addr) for addr in cc_addrs]
-            print(f"抄送人: {', '.join(cc_addrs_decoded)}")
-
-        body = extract_email_body(msg)
-        print("正文内容:")
-        print(body)
-
-        await save_attachments(msg)
-
-        print("================\n")
-
-        return '250 Message accepted for delivery'
+    def _format_address_list(self, addresses: List[Dict[str, str]]) -> str:
+        result = []
+        for addr in addresses:
+            name = addr.get('name', '')
+            address = addr.get('address', '')
+            if name:
+                result.append(f"{name} <{address}>")
+            else:
+                result.append(address)
+        return ', '.join(result)

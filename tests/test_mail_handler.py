@@ -5,42 +5,88 @@ from email.mime.text import MIMEText
 from email.mime.base import MIMEBase
 from email import encoders
 from email.header import Header
-from handler.mail_handler import decode_email_header, extract_email_body
+from handler.mail_handler import EmailParser, EmailParseError
 from utils.attachment import save_attachments
 from config import ATTACHMENTS_DIR
 
 
-class TestMailHandlerUtils(unittest.TestCase):
-    def test_decode_email_header_plain(self):
-        result = decode_email_header("Test Subject")
-        self.assertEqual(result, "Test Subject")
-
-    def test_decode_email_header_none(self):
-        result = decode_email_header(None)
-        self.assertEqual(result, "")
-
-    def test_decode_email_header_empty(self):
-        result = decode_email_header("")
-        self.assertEqual(result, "")
-
-    def test_decode_email_header_chinese(self):
-        encoded = str(Header("中文主题", 'utf-8'))
-        result = decode_email_header(encoded)
-        self.assertEqual(result, "中文主题")
-
-    def test_decode_email_header_mixed(self):
-        encoded = str(Header("中文 and English", 'utf-8'))
-        result = decode_email_header(encoded)
-        self.assertIn("中文", result)
-        self.assertIn("and English", result)
-
-    def test_extract_email_body_plain(self):
+class TestEmailParser(unittest.TestCase):
+    def test_parse_simple_email(self):
         msg = MIMEText("Hello World", 'plain', 'utf-8')
-        body = extract_email_body(msg)
-        self.assertEqual(body, "Hello World")
+        msg['From'] = 'sender@example.com'
+        msg['To'] = 'recipient@example.com'
+        msg['Subject'] = 'Test Subject'
+        
+        parser = EmailParser()
+        email_data = parser.parse_from_string(msg.as_string())
+        
+        self.assertEqual(email_data['from'][0]['address'], 'sender@example.com')
+        self.assertEqual(email_data['to'][0]['address'], 'recipient@example.com')
+        self.assertEqual(email_data['subject'], 'Test Subject')
+        self.assertIn('Hello World', email_data['body']['full'])
 
-    def test_extract_email_body_with_attachment(self):
+    def test_parse_email_with_chinese_subject(self):
+        msg = MIMEText("中文正文", 'plain', 'utf-8')
+        msg['From'] = 'sender@example.com'
+        msg['To'] = 'recipient@example.com'
+        msg['Subject'] = Header('中文主题', 'utf-8')
+        
+        parser = EmailParser()
+        email_data = parser.parse_from_string(msg.as_string())
+        
+        self.assertEqual(email_data['subject'], '中文主题')
+        self.assertIn('中文正文', email_data['body']['full'])
+
+    def test_parse_email_with_cc(self):
+        msg = MIMEText("Test body", 'plain', 'utf-8')
+        msg['From'] = 'sender@example.com'
+        msg['To'] = 'to@example.com'
+        msg['Cc'] = 'cc1@example.com, cc2@example.com'
+        msg['Subject'] = 'Test with CC'
+        
+        parser = EmailParser()
+        email_data = parser.parse_from_string(msg.as_string())
+        
+        self.assertEqual(len(email_data['cc']), 2)
+        cc_addresses = [cc['address'] for cc in email_data['cc']]
+        self.assertIn('cc1@example.com', cc_addresses)
+        self.assertIn('cc2@example.com', cc_addresses)
+
+    def test_parse_email_with_name(self):
+        msg = MIMEText("Test body", 'plain', 'utf-8')
+        msg['From'] = 'Sender Name <sender@example.com>'
+        msg['To'] = 'Recipient Name <recipient@example.com>'
+        msg['Subject'] = 'Test'
+        
+        parser = EmailParser()
+        email_data = parser.parse_from_string(msg.as_string())
+        
+        self.assertEqual(email_data['from'][0]['name'], 'Sender Name')
+        self.assertEqual(email_data['from'][0]['address'], 'sender@example.com')
+        self.assertEqual(email_data['to'][0]['name'], 'Recipient Name')
+        self.assertEqual(email_data['to'][0]['address'], 'recipient@example.com')
+
+    def test_parse_email_with_html_body(self):
+        msg = MIMEMultipart('alternative')
+        msg['From'] = 'sender@example.com'
+        msg['To'] = 'recipient@example.com'
+        msg['Subject'] = 'HTML Test'
+        
+        msg.attach(MIMEText("Plain text", 'plain', 'utf-8'))
+        msg.attach(MIMEText("<html><body>HTML content</body></html>", 'html', 'utf-8'))
+        
+        parser = EmailParser()
+        email_data = parser.parse_from_string(msg.as_string())
+        
+        self.assertIn('Plain text', email_data['body']['plain'][0])
+        self.assertIn('HTML content', email_data['body']['html'][0])
+
+    def test_parse_email_with_attachment(self):
         msg = MIMEMultipart()
+        msg['From'] = 'sender@example.com'
+        msg['To'] = 'recipient@example.com'
+        msg['Subject'] = 'Test with attachment'
+        
         msg.attach(MIMEText("Email body", 'plain', 'utf-8'))
         
         part = MIMEBase('application', 'octet-stream')
@@ -49,40 +95,89 @@ class TestMailHandlerUtils(unittest.TestCase):
         part.add_header('Content-Disposition', 'attachment', filename='test.txt')
         msg.attach(part)
         
-        body = extract_email_body(msg)
-        self.assertEqual(body, "Email body")
-        self.assertNotIn("attachment content", body)
-
-    def test_extract_email_body_html(self):
-        msg = MIMEText("<html><body>Hello</body></html>", 'html', 'utf-8')
-        body = extract_email_body(msg)
-        self.assertEqual(body, "<html><body>Hello</body></html>")
-
-    def test_extract_email_body_multipart_mixed(self):
-        msg = MIMEMultipart('mixed')
-        msg.attach(MIMEText("Plain body", 'plain', 'utf-8'))
-        msg.attach(MIMEText("<html>HTML body</html>", 'html', 'utf-8'))
+        parser = EmailParser()
+        email_data = parser.parse_from_string(msg.as_string())
         
-        body = extract_email_body(msg)
-        self.assertIn("Plain body", body)
-        self.assertIn("HTML body", body)
+        self.assertEqual(len(email_data['attachments']), 1)
+        self.assertEqual(email_data['attachments'][0]['filename'], 'test.txt')
+        self.assertEqual(email_data['attachments'][0]['binary'], b'attachment content')
 
-    def test_extract_email_body_only_attachment(self):
+    def test_parse_email_with_multiple_attachments(self):
         msg = MIMEMultipart()
+        msg['From'] = 'sender@example.com'
+        msg['To'] = 'recipient@example.com'
+        msg['Subject'] = 'Test with multiple attachments'
+        
+        msg.attach(MIMEText("Body", 'plain', 'utf-8'))
+        
+        for i in range(3):
+            part = MIMEBase('application', 'octet-stream')
+            part.set_payload(f'file {i}'.encode())
+            encoders.encode_base64(part)
+            part.add_header('Content-Disposition', 'attachment', filename=f'file{i}.txt')
+            msg.attach(part)
+        
+        parser = EmailParser()
+        email_data = parser.parse_from_string(msg.as_string())
+        
+        self.assertEqual(len(email_data['attachments']), 3)
+        filenames = [att['filename'] for att in email_data['attachments']]
+        self.assertIn('file0.txt', filenames)
+        self.assertIn('file1.txt', filenames)
+        self.assertIn('file2.txt', filenames)
+
+    def test_parse_email_with_chinese_attachment_name(self):
+        msg = MIMEMultipart()
+        msg['From'] = 'sender@example.com'
+        msg['To'] = 'recipient@example.com'
+        msg['Subject'] = 'Test'
+        
+        msg.attach(MIMEText("Body", 'plain', 'utf-8'))
         
         part = MIMEBase('application', 'octet-stream')
-        part.set_payload(b'only attachment')
+        part.set_payload(b'chinese content')
         encoders.encode_base64(part)
-        part.add_header('Content-Disposition', 'attachment', filename='test.txt')
+        filename = Header('中文文件.txt', 'utf-8').encode()
+        part.add_header('Content-Disposition', 'attachment', filename=filename)
         msg.attach(part)
         
-        body = extract_email_body(msg)
-        self.assertEqual(body, "")
+        parser = EmailParser()
+        email_data = parser.parse_from_string(msg.as_string())
+        
+        self.assertEqual(len(email_data['attachments']), 1)
+        self.assertEqual(email_data['attachments'][0]['filename'], '中文文件.txt')
 
-    def test_extract_email_body_empty(self):
+    def test_parse_empty_email(self):
         msg = MIMEText("", 'plain', 'utf-8')
-        body = extract_email_body(msg)
-        self.assertEqual(body, "")
+        msg['From'] = 'sender@example.com'
+        msg['To'] = 'recipient@example.com'
+        
+        parser = EmailParser()
+        email_data = parser.parse_from_string(msg.as_string())
+        
+        self.assertEqual(email_data['body']['full'], '')
+
+    def test_parse_invalid_content(self):
+        parser = EmailParser()
+        
+        email_data = parser.parse_from_bytes(b'invalid email content')
+        
+        self.assertEqual(email_data['from'], [])
+        self.assertEqual(email_data['to'], [])
+        self.assertEqual(email_data['subject'], '')
+
+    def test_parse_from_bytes(self):
+        msg = MIMEText("Hello World", 'plain', 'utf-8')
+        msg['From'] = 'sender@example.com'
+        msg['To'] = 'recipient@example.com'
+        msg['Subject'] = 'Test Subject'
+        
+        parser = EmailParser()
+        email_data = parser.parse_from_bytes(msg.as_string().encode('utf-8'))
+        
+        self.assertEqual(email_data['from'][0]['address'], 'sender@example.com')
+        self.assertEqual(email_data['to'][0]['address'], 'recipient@example.com')
+        self.assertEqual(email_data['subject'], 'Test Subject')
 
 
 class TestAttachmentHandling(unittest.TestCase):
@@ -97,35 +192,31 @@ class TestAttachmentHandling(unittest.TestCase):
                 os.remove(os.path.join(ATTACHMENTS_DIR, f))
 
     def test_save_attachments_single(self):
-        msg = MIMEMultipart()
-        msg.attach(MIMEText("Body", 'plain', 'utf-8'))
-        
-        part = MIMEBase('application', 'octet-stream')
-        part.set_payload(b'test content')
-        encoders.encode_base64(part)
-        part.add_header('Content-Disposition', 'attachment', filename='test1.txt')
-        msg.attach(part)
+        email_data = {
+            'attachments': [{
+                'filename': 'test1.txt',
+                'binary': b'test content'
+            }]
+        }
         
         import asyncio
-        asyncio.run(save_attachments(msg))
+        asyncio.run(save_attachments(email_data))
         
         self.assertTrue(os.path.exists(os.path.join(ATTACHMENTS_DIR, 'test1.txt')))
         with open(os.path.join(ATTACHMENTS_DIR, 'test1.txt'), 'rb') as f:
             self.assertEqual(f.read(), b'test content')
 
     def test_save_attachments_multiple(self):
-        msg = MIMEMultipart()
-        msg.attach(MIMEText("Body", 'plain', 'utf-8'))
-        
-        for i in range(3):
-            part = MIMEBase('application', 'octet-stream')
-            part.set_payload(f'file {i}'.encode())
-            encoders.encode_base64(part)
-            part.add_header('Content-Disposition', 'attachment', filename=f'file{i}.txt')
-            msg.attach(part)
+        email_data = {
+            'attachments': [
+                {'filename': 'file0.txt', 'binary': b'file 0'},
+                {'filename': 'file1.txt', 'binary': b'file 1'},
+                {'filename': 'file2.txt', 'binary': b'file 2'}
+            ]
+        }
         
         import asyncio
-        asyncio.run(save_attachments(msg))
+        asyncio.run(save_attachments(email_data))
         
         for i in range(3):
             filepath = os.path.join(ATTACHMENTS_DIR, f'file{i}.txt')
@@ -134,18 +225,15 @@ class TestAttachmentHandling(unittest.TestCase):
                 self.assertEqual(f.read(), f'file {i}'.encode())
 
     def test_save_attachments_chinese_filename(self):
-        msg = MIMEMultipart()
-        msg.attach(MIMEText("Body", 'plain', 'utf-8'))
-        
-        part = MIMEBase('application', 'octet-stream')
-        part.set_payload(b'chinese content')
-        encoders.encode_base64(part)
-        filename = Header('中文文件.txt', 'utf-8').encode()
-        part.add_header('Content-Disposition', 'attachment', filename=filename)
-        msg.attach(part)
+        email_data = {
+            'attachments': [{
+                'filename': '中文文件.txt',
+                'binary': b'chinese content'
+            }]
+        }
         
         import asyncio
-        asyncio.run(save_attachments(msg))
+        asyncio.run(save_attachments(email_data))
         
         filepath = os.path.join(ATTACHMENTS_DIR, '中文文件.txt')
         self.assertTrue(os.path.exists(filepath))
@@ -153,10 +241,25 @@ class TestAttachmentHandling(unittest.TestCase):
             self.assertEqual(f.read(), b'chinese content')
 
     def test_save_attachments_none(self):
-        msg = MIMEText("Body", 'plain', 'utf-8')
+        email_data = {
+            'attachments': []
+        }
         
         import asyncio
-        asyncio.run(save_attachments(msg))
+        asyncio.run(save_attachments(email_data))
+        
+        self.assertEqual(len(os.listdir(ATTACHMENTS_DIR)), 0)
+
+    def test_save_attachments_with_empty_binary(self):
+        email_data = {
+            'attachments': [{
+                'filename': 'empty.txt',
+                'binary': b''
+            }]
+        }
+        
+        import asyncio
+        asyncio.run(save_attachments(email_data))
         
         self.assertEqual(len(os.listdir(ATTACHMENTS_DIR)), 0)
 
